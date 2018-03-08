@@ -1,20 +1,22 @@
 # -*- coding:utf-8 -*-
+import argparse
+import datetime
+import json
+import os
 import shutil
 import time
-import os
-import requests
-import json
-import datetime
-import sys
-import argparse
 from multiprocessing.dummy import Pool
+
+import requests
 
 
 class tweetimg(object):
-    def __init__(self):
+    def __init__(self, limit, maxid):
         self.oauth = "https://api.twitter.com/oauth2/token"
         self.statuses = "https://api.twitter.com/1.1/statuses/user_timeline.json"
-        self.lastid = None
+        self.lastid = maxid
+        self.limit = limit
+        self.id = 0
         self.flag = 0
         self.count = 1
 
@@ -32,20 +34,19 @@ class tweetimg(object):
         auth = (consumer_key, consumer_secret)
         data = {'grant_type': 'client_credentials'}
         r = requests.post(host, headers=headers, auth=auth, data=data)
-
         if r.status_code == 200:
             token = json.loads(r.text)["access_token"]
             return token
         else:
             return False
 
-    def getid(self, token, user, exclude_replies, include_rts, maxid=None, count=200):
+    def getid(self, token, user, exclude_replies, include_rts, maxid):
         # check max_id
         # https://dev.twitter.com/rest/reference/get/statuses/user_timeline
         # https://dev.twitter.com/rest/public/timelines
         host = self.statuses
         headers = {"Authorization": "Bearer " + token}
-        params = {"screen_name": user, "count": count,
+        params = {"screen_name": user, "count": self.limit,
                   "exclude_replies": exclude_replies, "include_rts": include_rts}
         if maxid:
             params["max_id"] = maxid
@@ -56,11 +57,8 @@ class tweetimg(object):
             if self.flag > self.count:
                 return []
             else:
-                print "Received %s responses" % len(user_tweets)
-                if maxid:
-                    return user_tweets[1:]
-                else:
-                    return user_tweets
+                print("Received %s responses" % len(user_tweets))
+                return user_tweets
 
     def __dformat(self, dates):
         dateformat = datetime.datetime.strptime(
@@ -77,46 +75,65 @@ class tweetimg(object):
                             include_rts, self.lastid)
         while len(tweets) > 0:
             for t in tweets:
-                try:
-                    imgdict = {}
+                imgdict = {}
+                if "extended_entities" in t:
                     entities = t["extended_entities"]["media"]
                     createdat = self.__dformat(t["created_at"])
                     imgdict["date"] = createdat
                     temp = []
                     for media in entities:
-                        temp.append(media["media_url_https"])
+                        if "video_info" in media:
+                            videos = media["video_info"]
+                            for v in videos["variants"]:
+                                if "bitrate" in v:
+                                    if v["bitrate"] == 832000:
+                                        temp.append(v["url"])
+                        else:
+                            temp.append(media["media_url_https"])
                     imgdict["urls"] = temp
                     imgs.append(imgdict)
-                    self.lastid = t["id"]
-                    if t["user"]["statuses_count"] < 3300:
-                        self.count = (t["user"]["statuses_count"] / 200) + 2
-                    else:
-                        self.count = 20
-                except:
-                    pass
-            tweets = self.getid(token, user, exclude_replies,
-                                include_rts, self.lastid)
+                    if t["id"] != self.lastid:
+                        self.id = t["id"]
+                else:
+                    self.id = t["id"]
+            if self.limit < 200:
+                return imgs
+            else:
+                if t["user"]["statuses_count"] < 3300:
+                    self.count = (t["user"]["statuses_count"] / 200) + 2
+                else:
+                    self.count = 20
+                tweets = self.getid(
+                    token, user, exclude_replies, include_rts, self.id)
         return imgs
 
     def __downloadcore(self, paras):
         imgpath = paras[0]
         url = paras[1]
+        if url.split(".")[-1] == "mp4":
+            url = url
+        else:
+            url = url + ":orig"
         try:
-            r = requests.get(url + ":orig", stream=True, timeout=30)
+            r = requests.get(url, stream=True, timeout=30)
             with open(imgpath, 'wb') as f:
                 r.raw.decode_content = True
                 shutil.copyfileobj(r.raw, f)
-        except:
-            print "Read timed out. [ Retry ]"
+        except BaseException:
+            print("Read timed out. [ Retry ]")
             self.__retry(imgpath, url)
 
     def __retry(self, imgpath, url):
+        if url.split(".")[-1] == "mp4":
+            url = url
+        else:
+            url = url + ":orig"
         r = requests.get(url + ":orig", stream=True, timeout=30)
         with open(imgpath, 'wb') as f:
             r.raw.decode_content = True
             shutil.copyfileobj(r.raw, f)
 
-    def getimg(self, imgurl, save_path):
+    def getimg(self, imgurl, save_path, thread):
         imgnames = []
         imgurls = []
         if not os.path.exists(save_path):
@@ -129,20 +146,26 @@ class tweetimg(object):
                     save_path, times + "_" + u.split("/")[-1])
                 imgnames.append(imgname)
                 imgurls.append(u)
-        print "With pictures: %s " % len(imgurls)
-        print "Downloing..."
-        pool = Pool(50)
+        print("With pictures: %s " % len(imgurls))
+        print("Downloing...")
+        pool = Pool(thread)
         pool.map(self.__downloadcore, zip(imgnames, imgurls))
         pool.close()
         pool.join()
 
 
-
 def opts():
-    parser = argparse.ArgumentParser(description = "Twitter Image Download.")
-    parser.add_argument('-u',dest='userid',help="screen name [@twitter]",required=True)
-    parser.add_argument('-c',dest='apifile',help="APIdatas.json",required=True)
-    parser.add_argument('-s',action='store_true',dest="ret",default=False,help="exclude retweets and replies")
+    parser = argparse.ArgumentParser(description="Twitter Image Download.")
+    parser.add_argument('-u', dest='userid',
+                        help="screen name [@twitter]", required=True)
+    parser.add_argument('-c', dest='apifile',
+                        help="APIdatas.json", required=True)
+    parser.add_argument('-s', action='store_true', dest="ret",
+                        default=False, help="exclude retweets and replies")
+    parser.add_argument('-l', dest='limit', default=200, type=int,
+                        help="[default: 200] specifies the number of Tweets to try and retrieve, up to a maximum of 200 per distinct request.")
+    parser.add_argument(
+        '--id', dest='maxid', default=None, type=int, help="[default: first id] returns results with an ID less than or equal to the specified ID")
     args = parser.parse_args()
     return args
 
@@ -151,6 +174,8 @@ def main():
     paras = opts()
     userid = paras.userid
     apifile = paras.apifile
+    limit = paras.limit
+    maxid = paras.maxid
     savepath = userid + "_" + time.strftime("%Y%m%d%H%M%S")
     if paras.ret:
         exclude_replies = True
@@ -159,14 +184,20 @@ def main():
         exclude_replies = False
         include_rts = True
 
-    t = tweetimg()
+    t = tweetimg(limit, maxid)
     token = t.authtoken(apifile)
     if token:
         imgs = t.getimgurl(token, userid, exclude_replies, include_rts)
-        t.getimg(imgs, savepath)
-        raw_input("Press Enter to exit.")
+        thread = len(imgs) / 4
+        if thread >= 100:
+            thread = 30
+        elif thread < 10:
+            thread = 2
+        else:
+            thread = 10
+        t.getimg(imgs, savepath, thread)
     else:
-        print "Bad Authentication."
+        print("Bad Authentication.")
 
 
 if __name__ == "__main__":
