@@ -86,7 +86,7 @@ class tweetimg(object):
                             videos = media["video_info"]
                             for v in videos["variants"]:
                                 if "bitrate" in v:
-                                    if v["bitrate"] == 832000:
+                                    if v["bitrate"] == 2176000:
                                         temp.append(v["url"])
                         else:
                             temp.append(media["media_url_https"])
